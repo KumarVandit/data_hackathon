@@ -1,0 +1,90 @@
+# Atlas Engine Configuration
+# Data Processing and Knowledge Graph Pipeline
+
+data:
+  # Input data paths (mounted from host)
+  # These are directory names, not full paths - code will find CSV files within
+  enrolment_dir: api_data_aadhar_enrolment
+  demographic_dir: api_data_aadhar_demographic
+  biometric_dir: api_data_aadhar_biometric
+  base_path: /app/data
+  
+  # Output paths
+  processed_path: /app/processed
+  checkpoint_dir: /app/processed/checkpoints
+  
+  # Processing settings
+  batch_size: 10000
+  chunk_size: 50000
+
+# Checkpoint and resume settings
+checkpoint:
+  enabled: true
+  save_after_each_stage: true
+  auto_resume: false  # If true, automatically resume from latest checkpoint
+
+feature_engineering:
+  # Enable feature engineering modules
+  enable_temporal_features: true
+  enable_ratio_features: true
+  enable_velocity_features: true
+  enable_risk_scoring: true
+  
+  # Feature calculation parameters
+  temporal_window_days: 30
+  min_samples_for_statistics: 10
+
+anomaly_detection:
+  enabled: true
+  method: isolation_forest  # Options: isolation_forest, dbscan, statistical
+  
+  # Isolation Forest parameters
+  contamination: 0.01
+  n_estimators: 100
+  
+  # Multiple methods can be enabled simultaneously
+  methods:
+    isolation_forest:
+      enabled: true
+      contamination: 0.01
+      n_estimators: 100
+    dbscan:
+      enabled: true
+      eps: 0.5
+      min_samples: 5
+    statistical:
+      enabled: false
+
+pattern_detection:
+  enabled: true
+  min_pattern_occurrences: 5
+  correlation_threshold: 0.7
+  temporal_pattern_window: 7  # days
+
+graph:
+  # Graphiti MCP connection
+  mcp_url: http://graphiti-mcp:8000
+  
+  # Entity types to create (matching ontology.yaml)
+  entity_types:
+    - GeographicSoul
+    - IdentityLifecycle
+    - BehavioralSignature
+    - SystemicTension
+    - EmergentThreat
+  
+  # Edge types to create (matching ontology.yaml)
+  edge_types:
+    - LOCATED_IN
+    - BORN_IN
+    - MANIFESTS
+    - EXPERIENCES
+    - REVEALS
+    - SUGGESTS
+    - ECHOES
+    - PRECEDES
+
+logging:
+  level: INFO
+  format: "{time} | {level} | {message}"
+  file: /app/processed/atlas_engine.log

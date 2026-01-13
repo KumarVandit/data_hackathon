@@ -1,0 +1,29 @@
+# Core dependencies
+pandas>=2.1.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# Graph database client
+redis>=5.0.0
+
+# Machine learning for anomaly detection
+scikit-learn>=1.3.0
+
+# HTTP client for Graphiti MCP
+httpx>=0.25.0
+requests>=2.31.0
+
+# Async support
+asyncio-compat>=0.1.0
+
+# Logging and monitoring
+loguru>=0.7.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Data serialization
+pyarrow>=14.0.0
+
+# Geospatial indexing
+h3>=3.7.6

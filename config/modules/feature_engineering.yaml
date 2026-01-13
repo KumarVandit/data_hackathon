@@ -1,0 +1,77 @@
+# Feature Engineering Module Configuration
+
+enabled: true
+
+temporal_features:
+  enabled: true
+  window_days: 30
+  calculations:
+    - velocity
+    - variance
+    - coefficient_of_variation
+    - trend
+    - seasonality
+
+ratio_features:
+  enabled: true
+  calculations:
+    - child_ratio
+    - youth_ratio
+    - adult_ratio
+    - motion_intensity
+    - persistence_intensity
+    - motion_to_persistence_ratio
+    - update_to_enrolment_ratio
+    - demo_to_bio_ratio
+
+velocity_features:
+  enabled: true
+  calculations:
+    - creation_velocity
+    - motion_velocity
+    - persistence_velocity
+    - acceleration  # Rate of change of velocity
+
+risk_scoring:
+  enabled: true
+  methods:
+    - composite_anomaly_score
+    - fraud_risk_score
+    - trafficking_risk_score
+  
+  fraud_risk_factors:
+    - creation_without_motion
+    - high_creation_velocity
+    - low_motion_intensity
+    - ghost_farm_pattern
+  
+  trafficking_risk_factors:
+    - high_child_ratio
+    - sudden_motion_spikes
+    - coordinated_updates
+    - demographic_mismatch
+
+archetype_classification:
+  enabled: true
+  rules:
+    GHOST_FARM:
+      - motion_intensity < 0.1
+      - creation_velocity > mean_creation_velocity
+    CROSSROADS:
+      - motion_intensity > 2.0
+    NURSERY:
+      - creation_velocity > 2 * mean_creation_velocity
+      - child_ratio > 0.3
+    BEDROCK:
+      - creation_variance < 0.2 * creation_velocity
+      - motion_variance < 0.2 * motion_velocity
+    DORMANT:
+      - default: true
+
+normalization:
+  enabled: true
+  method: standard_scaler
+  features:
+    - all_velocity_features
+    - all_ratio_features
+    - all_variance_features

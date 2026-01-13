@@ -1,0 +1,369 @@
+# Graph Ontology Configuration
+# Defines all entity types, edge types, and their properties for Project Atlas
+
+entity_types:
+  GeographicSoul:
+    description: "The character and personality of a place, defined by patterns of Creation, Motion, and Persistence"
+    properties:
+      # Identity
+      - name: id
+        type: string
+        required: true
+        pattern: "{type}_{code}"
+      - name: name
+        type: string
+        required: true
+      - name: type
+        type: enum
+        values: [STATE, DISTRICT, PINCODE]
+        required: true
+      - name: parent_id
+        type: string
+        required: false
+      
+      # Core Metrics
+      - name: total_creation
+        type: int
+        default: 0
+      - name: total_motion
+        type: int
+        default: 0
+      - name: total_persistence
+        type: int
+        default: 0
+      
+      # Demographic Composition
+      - name: child_creation_count
+        type: int
+        default: 0
+      - name: youth_creation_count
+        type: int
+        default: 0
+      - name: adult_creation_count
+        type: int
+        default: 0
+      - name: youth_motion_count
+        type: int
+        default: 0
+      - name: adult_motion_count
+        type: int
+        default: 0
+      - name: youth_persistence_count
+        type: int
+        default: 0
+      - name: adult_persistence_count
+        type: int
+        default: 0
+      
+      # Derived Ratios
+      - name: child_ratio
+        type: float
+        default: 0.0
+      - name: youth_ratio
+        type: float
+        default: 0.0
+      - name: adult_ratio
+        type: float
+        default: 0.0
+      - name: motion_intensity
+        type: float
+        default: 0.0
+      - name: persistence_intensity
+        type: float
+        default: 0.0
+      - name: motion_to_persistence_ratio
+        type: float
+        default: 0.0
+      
+      # Temporal Characteristics
+      - name: creation_velocity
+        type: float
+        default: 0.0
+      - name: motion_velocity
+        type: float
+        default: 0.0
+      - name: persistence_velocity
+        type: float
+        default: 0.0
+      - name: creation_variance
+        type: float
+        default: 0.0
+      - name: motion_variance
+        type: float
+        default: 0.0
+      - name: persistence_variance
+        type: float
+        default: 0.0
+      - name: coefficient_of_variation_creation
+        type: float
+        default: 0.0
+      
+      # Classification
+      - name: archetype
+        type: enum
+        values: [NURSERY, CROSSROADS, BEDROCK, GHOST_FARM, DORMANT]
+        default: DORMANT
+      
+      # Risk Scoring
+      - name: anomaly_score
+        type: float
+        default: 0.0
+      - name: fraud_risk_score
+        type: float
+        default: 0.0
+      - name: trafficking_risk_score
+        type: float
+        default: 0.0
+
+  IdentityLifecycle:
+    description: "The archetypal journey of a cohort of identities born in a specific place and time"
+    properties:
+      - name: id
+        type: string
+        required: true
+        pattern: "LIFECYCLE_{pincode}_{date_cohort}"
+      - name: origin_location_id
+        type: string
+        required: true
+      - name: birth_date
+        type: date
+        required: true
+      - name: cohort_size
+        type: int
+        required: true
+      - name: age_group_distribution
+        type: json
+        required: false
+      - name: subsequent_motion_events
+        type: int
+        default: 0
+      - name: subsequent_persistence_events
+        type: int
+        default: 0
+      - name: days_since_birth
+        type: int
+        default: 0
+      - name: motion_frequency
+        type: float
+        default: 0.0
+      - name: lifecycle_stage
+        type: enum
+        values: [NEWBORN, ACTIVE, DORMANT, GHOST]
+        default: NEWBORN
+
+  BehavioralSignature:
+    description: "A recurring, recognizable pattern of behavior that the system has learned"
+    properties:
+      - name: id
+        type: string
+        required: true
+        pattern: "SIGNATURE_{hash}"
+      - name: signature_type
+        type: enum
+        values: [TEMPORAL_SPIKE, COORDINATED_UPDATE, SEASONAL_MIGRATION, WEEKEND_ANOMALY, GHOST_FARM_PATTERN]
+        required: true
+      - name: description
+        type: string
+        required: true
+      - name: signature_hash
+        type: string
+        required: true
+      - name: first_observed
+        type: date
+        required: true
+      - name: last_observed
+        type: date
+        required: true
+      - name: occurrence_count
+        type: int
+        default: 0
+      - name: locations_involved
+        type: list
+        default: []
+      - name: confidence_score
+        type: float
+        default: 0.0
+      - name: temporal_pattern
+        type: json
+        required: false
+      - name: magnitude_range
+        type: json
+        required: false
+      - name: affected_age_groups
+        type: list
+        default: []
+
+  SystemicTension:
+    description: "The dissonance between the three fundamental forces"
+    properties:
+      - name: id
+        type: string
+        required: true
+        pattern: "TENSION_{timestamp}_{location_id}"
+      - name: tension_type
+        type: enum
+        values: [CREATION_WITHOUT_MOTION, MOTION_WITHOUT_CREATION, PERSISTENCE_WITHOUT_PAST, DEMOGRAPHIC_MISMATCH, TEMPORAL_SHOCK, COORDINATED_ANOMALY]
+        required: true
+      - name: description
+        type: string
+        required: true
+      - name: location_id
+        type: string
+        required: true
+      - name: detected_at
+        type: timestamp
+        required: true
+      - name: severity
+        type: float
+        default: 0.0
+      - name: z_score
+        type: float
+        default: 0.0
+      - name: is_reviewed
+        type: bool
+        default: false
+      - name: analyst_notes
+        type: string
+        required: false
+      - name: expected_value
+        type: float
+        required: false
+      - name: observed_value
+        type: float
+        required: false
+      - name: deviation_magnitude
+        type: float
+        default: 0.0
+      - name: contributing_factors
+        type: json
+        required: false
+
+  EmergentThreat:
+    description: "An inferred narrative of risk, built by connecting multiple tensions and signatures"
+    properties:
+      - name: id
+        type: string
+        required: true
+        pattern: "THREAT_{hash}"
+      - name: threat_type
+        type: enum
+        values: [IDENTITY_FRAUD_RING, HUMAN_TRAFFICKING_NETWORK, SLEEPER_CELL_ACTIVATION, ECONOMIC_SHADOW_NETWORK, COORDINATED_ANOMALY]
+        required: true
+      - name: title
+        type: string
+        required: true
+      - name: narrative
+        type: string
+        required: true
+      - name: severity_level
+        type: int
+        default: 1
+      - name: confidence
+        type: float
+        default: 0.0
+      - name: first_detected
+        type: timestamp
+        required: true
+      - name: last_updated
+        type: timestamp
+        required: true
+      - name: status
+        type: enum
+        values: [ACTIVE, MONITORING, RESOLVED, FALSE_POSITIVE]
+        default: ACTIVE
+      - name: related_tensions
+        type: list
+        default: []
+      - name: related_signatures
+        type: list
+        default: []
+      - name: affected_locations
+        type: list
+        default: []
+      - name: affected_lifecycles
+        type: list
+        default: []
+      - name: geographic_spread
+        type: int
+        default: 0
+      - name: temporal_span_days
+        type: int
+        default: 0
+      - name: estimated_entities_involved
+        type: int
+        default: 0
+
+edge_types:
+  LOCATED_IN:
+    description: "Hierarchical containment (Pincode → District → State)"
+    from: GeographicSoul
+    to: GeographicSoul
+    properties: []
+
+  BORN_IN:
+    description: "This cohort of identities originated in this location"
+    from: IdentityLifecycle
+    to: GeographicSoul
+    properties:
+      - name: birth_date
+        type: date
+      - name: cohort_size
+        type: int
+
+  MANIFESTS:
+    description: "This location exhibits this recurring pattern"
+    from: GeographicSoul
+    to: BehavioralSignature
+    properties:
+      - name: confidence_score
+        type: float
+      - name: first_observed
+        type: date
+      - name: last_observed
+        type: date
+
+  EXPERIENCES:
+    description: "This entity is experiencing this dissonance"
+    from: [GeographicSoul, IdentityLifecycle]
+    to: SystemicTension
+    properties:
+      - name: detected_at
+        type: timestamp
+      - name: severity
+        type: float
+
+  REVEALS:
+    description: "This tension is evidence for this threat"
+    from: SystemicTension
+    to: EmergentThreat
+    properties:
+      - name: contribution_weight
+        type: float
+
+  ECHOES:
+    description: "These two locations have similar characters and rhythms"
+    from: GeographicSoul
+    to: GeographicSoul
+    properties:
+      - name: similarity_score
+        type: float
+      - name: similarity_dimensions
+        type: list
+
+  PRECEDES:
+    description: "This pattern consistently occurs before that pattern"
+    from: BehavioralSignature
+    to: BehavioralSignature
+    properties:
+      - name: lag_days
+        type: int
+      - name: confidence
+        type: float
+
+  SUGGESTS:
+    description: "This pattern is an indicator of this threat"
+    from: BehavioralSignature
+    to: EmergentThreat
+    properties:
+      - name: relevance_score
+        type: float

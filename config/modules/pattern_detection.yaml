@@ -1,0 +1,54 @@
+# Pattern Detection Module Configuration
+
+enabled: true
+
+pattern_types:
+  TEMPORAL_SPIKE:
+    enabled: true
+    detection_method: time_series_analysis
+    min_occurrences: 3
+    spike_threshold: 2.0  # Multiple of mean
+    
+  COORDINATED_UPDATE:
+    enabled: true
+    detection_method: clustering
+    min_locations: 3
+    time_window_hours: 48
+    correlation_threshold: 0.7
+    
+  SEASONAL_MIGRATION:
+    enabled: true
+    detection_method: seasonal_decomposition
+    min_cycles: 2
+    seasonality_period: 30  # days
+    
+  WEEKEND_ANOMALY:
+    enabled: true
+    detection_method: day_of_week_analysis
+    anomaly_threshold: 1.5
+    
+  GHOST_FARM_PATTERN:
+    enabled: true
+    detection_method: ratio_analysis
+    conditions:
+      - creation_velocity > mean * 2
+      - motion_velocity < 0.1
+      - duration_days > 60
+    min_locations: 2
+
+discovery:
+  sequence_mining:
+    enabled: true
+    min_support: 0.1
+    min_confidence: 0.7
+    
+  correlation_analysis:
+    enabled: true
+    correlation_threshold: 0.7
+    min_pairs: 5
+
+output:
+  min_confidence: 0.6
+  create_signature_nodes: true
+  link_to_geographic: true
+  track_occurrences: true

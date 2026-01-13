@@ -1,0 +1,86 @@
+# Anomaly Detection Module Configuration
+
+enabled: true
+
+methods:
+  isolation_forest:
+    enabled: true
+    contamination: 0.01
+    n_estimators: 100
+    random_state: 42
+    features:
+      - motion_intensity
+      - persistence_intensity
+      - creation_velocity
+      - motion_velocity
+      - persistence_velocity
+      - child_ratio
+      - youth_ratio
+      - adult_ratio
+
+  dbscan:
+    enabled: true
+    eps: 0.5
+    min_samples: 5
+    metric: euclidean
+    features:
+      - motion_intensity
+      - persistence_intensity
+      - creation_velocity
+      - motion_velocity
+      - persistence_velocity
+
+  statistical:
+    enabled: true
+    z_score_threshold: 3.0
+    methods:
+      - z_score
+      - iqr
+    features:
+      - creation_velocity
+      - motion_velocity
+      - persistence_velocity
+      - motion_intensity
+      - persistence_intensity
+
+tension_types:
+  CREATION_WITHOUT_MOTION:
+    enabled: true
+    detection_logic:
+      condition: "creation_velocity > 2*std AND motion_velocity < 0.1"
+      severity_calculation: "deviation_magnitude * 10"
+    
+  MOTION_WITHOUT_CREATION:
+    enabled: true
+    detection_logic:
+      condition: "motion_velocity > 2*std AND total_creation < 0.5 * expected"
+      severity_calculation: "deviation_magnitude * 10"
+    
+  PERSISTENCE_WITHOUT_PAST:
+    enabled: true
+    detection_logic:
+      condition: "persistence_velocity > 0 AND total_creation == 0"
+      severity_calculation: "persistence_velocity * 20"
+    
+  DEMOGRAPHIC_MISMATCH:
+    enabled: true
+    detection_logic:
+      condition: "abs(child_ratio - neighbor_mean_child_ratio) > 3*std"
+      severity_calculation: "deviation_magnitude * 15"
+    
+  TEMPORAL_SHOCK:
+    enabled: true
+    detection_logic:
+      condition: "daily_value > mean + 3*std"
+      severity_calculation: "z_score * 10"
+    
+  COORDINATED_ANOMALY:
+    enabled: true
+    detection_logic:
+      condition: "clustering_algorithm detects synchronization"
+      severity_calculation: "cluster_size * 5"
+
+output:
+  min_severity: 10.0
+  create_tension_nodes: true
+  link_to_geographic: true

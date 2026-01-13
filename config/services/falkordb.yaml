@@ -1,0 +1,38 @@
+# FalkorDB Service Configuration
+
+connection:
+  host: falkordb
+  port: 6379
+  password: falkordb
+  db: 0
+  decode_responses: true
+  socket_timeout: 5
+  socket_connect_timeout: 5
+
+pool:
+  max_connections: 50
+  retry_on_timeout: true
+
+graph:
+  name: atlas_graph
+  auto_create: true
+
+queries:
+  timeout_seconds: 30
+  max_results: 10000
+
+indexing:
+  auto_index: true
+  index_properties:
+    - id
+    - name
+    - type
+    - archetype
+    - lifecycle_stage
+    - tension_type
+    - threat_type
+
+logging:
+  log_queries: false
+  log_results: false
+  log_errors: true

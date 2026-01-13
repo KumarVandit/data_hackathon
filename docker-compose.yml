@@ -1,0 +1,160 @@
+version: '3.8'
+
+services:
+  # Graph Database
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: falkordb
+    ports:
+      - "6379:6379"
+      - "3000:3000"
+    environment:
+      - REDIS_ARGS=--requirepass falkordb
+    volumes:
+      - falkordb_data:/data
+    restart: unless-stopped
+    networks:
+      - atlas_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "falkordb", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Local LLM Provider
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - atlas_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Graphiti MCP Server - Knowledge Graph Engine
+  graphiti-mcp:
+    build:
+      context: ./mcp_server
+      dockerfile: Dockerfile
+    container_name: graphiti-mcp
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./mcp_server:/app
+      - graphiti_data:/app/graph_data
+    depends_on:
+      falkordb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      - FALKORDB_HOST=falkordb
+      - FALKORDB_PORT=6379
+      - FALKORDB_PASSWORD=falkordb
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - GRAPHITI_LOG_LEVEL=INFO
+    restart: unless-stopped
+    networks:
+      - atlas_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Atlas Engine - Data Processing & Intelligence Pipeline
+  atlas-engine:
+    build:
+      context: ./atlas-engine
+      dockerfile: Dockerfile
+    container_name: atlas-engine
+    volumes:
+      - ./data:/app/data:ro
+      - ./atlas-engine:/app
+      - ./config:/app/config:ro
+      - atlas_engine_data:/app/processed
+    depends_on:
+      graphiti-mcp:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    environment:
+      - GRAPHITI_MCP_URL=http://graphiti-mcp:8000
+      - FALKORDB_HOST=falkordb
+      - FALKORDB_PORT=6379
+      - FALKORDB_PASSWORD=falkordb
+      - DATA_PATH=/app/data
+      - PROCESSED_PATH=/app/processed
+      - LOG_LEVEL=INFO
+      - BATCH_SIZE=10000
+    restart: unless-stopped
+    networks:
+      - atlas_network
+    # Run on demand, not always running
+    profiles:
+      - processing
+
+  # Atlas Dashboard - Advanced 3D Visualization & Analytics
+  atlas-dashboard:
+    build:
+      context: ./atlas-dashboard
+      dockerfile: Dockerfile
+    container_name: atlas-dashboard
+    ports:
+      - "5173:5173"  # Frontend
+      - "8001:8001"  # Backend API
+    volumes:
+      - ./atlas-dashboard/frontend:/app/frontend  # Mount source for dev mode
+      - ./atlas-dashboard/backend:/app/backend
+      - ./atlas-dashboard/package.json:/app/package.json:ro
+      - ./atlas-dashboard/vite.config.ts:/app/vite.config.ts:ro
+      - ./atlas-dashboard/tsconfig.json:/app/tsconfig.json:ro
+      - ./atlas-dashboard/tsconfig.node.json:/app/tsconfig.node.json:ro
+      - ./atlas-dashboard/tailwind.config.js:/app/tailwind.config.js:ro
+      - ./atlas-dashboard/postcss.config.js:/app/postcss.config.js:ro
+      - ./atlas-dashboard/index.html:/app/index.html:ro
+      - ./config:/app/config:ro
+      - atlas_engine_data:/app/processed:ro
+      - atlas_dashboard_node_modules:/app/frontend/node_modules  # Persist node_modules
+    depends_on:
+      - graphiti-mcp
+      - falkordb
+    environment:
+      - GRAPHITI_MCP_URL=http://graphiti-mcp:8000
+      - FALKORDB_HOST=falkordb
+      - FALKORDB_PORT=6379
+      - FALKORDB_PASSWORD=falkordb
+      - PROCESSED_PATH=/app/processed
+      - API_URL=http://localhost:8001
+      - VITE_API_URL=http://localhost:8001
+      - NODE_ENV=development
+    restart: unless-stopped
+    networks:
+      - atlas_network
+    profiles:
+      - dashboard
+
+volumes:
+  falkordb_data:
+    driver: local
+  ollama_data:
+    driver: local
+  graphiti_data:
+    driver: local
+  atlas_engine_data:
+    driver: local
+
+networks:
+  atlas_network:
+    driver: bridge
+    name: atlas_network

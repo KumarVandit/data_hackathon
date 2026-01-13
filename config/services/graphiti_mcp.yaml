@@ -1,0 +1,44 @@
+# Graphiti MCP Service Configuration
+
+connection:
+  url: http://graphiti-mcp:8000
+  timeout_seconds: 30
+  retry_attempts: 3
+  retry_delay_seconds: 5
+
+authentication:
+  type: none  # Graphiti MCP doesn't require auth in Docker network
+
+endpoints:
+  health: /health
+  mcp: /mcp/
+  graph: /graph/
+
+operations:
+  add_entity:
+    endpoint: /mcp/tools/add_entity
+    method: POST
+    batch_size: 100
+    
+  add_edge:
+    endpoint: /mcp/tools/add_edge
+    method: POST
+    batch_size: 100
+    
+  query:
+    endpoint: /mcp/tools/query
+    method: POST
+    
+  search:
+    endpoint: /mcp/tools/search
+    method: POST
+
+rate_limiting:
+  enabled: true
+  requests_per_second: 10
+  burst_size: 20
+
+logging:
+  log_requests: true
+  log_responses: false
+  log_errors: true
