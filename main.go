@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -76,6 +76,11 @@ type model struct {
 	logs           map[string][]string
 	logViewer      string // which service logs are being viewed
 	graphStats     graphStats
+	// Startup progress tracking
+	startupInProgress bool
+	startupProgress   map[string]startupProgress
+	startupStartTime  time.Time
+	startupLogs       []string
 }
 
 type service struct {
@@ -112,10 +117,23 @@ type graphStats struct {
 	lastUpdate string
 }
 
+type startupProgress struct {
+	serviceName    string
+	step           string  // "starting", "waiting_health", "completed", "failed"
+	progress       float64 // 0.0 to 1.0
+	elapsedTime    time.Duration
+	estimatedTotal time.Duration
+	logs           []string
+}
+
 type tickMsg time.Time
 type statusMsg struct {
 	message string
 	msgType string
+}
+
+type progressMsg struct {
+	progress startupProgress
 }
 
 func initialModel() model {
@@ -129,14 +147,17 @@ func initialModel() model {
 			{name: "Atlas Engine", port: "", url: ""},
 			{name: "Atlas Dashboard", port: "5173 (UI) / 8001 (API)", url: "http://localhost:5173"},
 		},
-		stats:          systemStats{},
-		containerStats: make(map[string]containerStat),
-		lastUpdate:     time.Now(),
-		statusMsg:      "Ready",
-		statusType:     "success",
-		logs:           make(map[string][]string),
-		logViewer:      "",
-		graphStats:     graphStats{},
+		stats:             systemStats{},
+		containerStats:    make(map[string]containerStat),
+		lastUpdate:        time.Now(),
+		statusMsg:         "Ready",
+		statusType:        "success",
+		logs:              make(map[string][]string),
+		logViewer:         "",
+		graphStats:        graphStats{},
+		startupInProgress: false,
+		startupProgress:   make(map[string]startupProgress),
+		startupLogs:       make([]string, 0),
 	}
 }
 
@@ -201,8 +222,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			return m, checkServices()
 		case "s":
+			m.startupInProgress = true
+			m.startupStartTime = time.Now()
+			m.startupProgress = make(map[string]startupProgress)
+			m.startupLogs = []string{"Initializing service startup..."}
 			return m, tea.Batch(
-				startServices(),
+				startServicesWithProgress(),
 				func() tea.Msg { return statusMsg{message: "Starting all core services...", msgType: "info"} },
 			)
 		case "x":
@@ -227,11 +252,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		cmds := []tea.Cmd{updateStats(), tick()}
-		if m.currentView == viewStats {
-			cmds = append(cmds, updateContainerStats())
-		}
+		// Always update container stats, not just in stats view
+		cmds = append(cmds, updateContainerStats())
 		if m.currentView == viewLogs && m.logViewer != "" {
 			cmds = append(cmds, fetchLogs(m.logViewer))
+		}
+		// Update elapsed time for startup progress
+		if m.startupInProgress {
+			// Update elapsed times for all services in progress
+			for name, progress := range m.startupProgress {
+				if progress.step != "completed" && progress.step != "failed" {
+					progress.elapsedTime = time.Since(m.startupStartTime)
+					m.startupProgress[name] = progress
+				}
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -260,6 +294,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case graphStats:
 		m.graphStats = msg
 		return m, nil
+
+	case progressMsg:
+		m.startupProgress[msg.progress.serviceName] = msg.progress
+		if len(msg.progress.logs) > 0 {
+			// Append new logs to startup logs
+			m.startupLogs = append(m.startupLogs, msg.progress.logs...)
+			// Keep only last 100 lines
+			if len(m.startupLogs) > 100 {
+				m.startupLogs = m.startupLogs[len(m.startupLogs)-100:]
+			}
+		}
+		// Continue reading from channel if startup is still in progress
+		var cmd tea.Cmd = nil
+		if m.startupInProgress {
+			// Check if all services are completed
+			allCompleted := true
+			completedCount := 0
+			for _, progress := range m.startupProgress {
+				if progress.step == "completed" || progress.step == "failed" {
+					completedCount++
+				}
+				if progress.step != "completed" && progress.step != "failed" {
+					allCompleted = false
+				}
+			}
+			// If we have progress for all 3 services and all are done
+			if completedCount >= 3 && allCompleted {
+				m.startupInProgress = false
+				cmd = tea.Batch(
+					checkServices(),
+					func() tea.Msg { return statusMsg{message: "All services started successfully", msgType: "success"} },
+				)
+			} else {
+				// Continue reading progress messages
+				cmd = readNextStartupProgress()
+			}
+		}
+		return m, cmd
 	}
 
 	return m, nil
@@ -312,24 +384,28 @@ func (m model) renderTabs() string {
 }
 
 func (m model) renderServicesView() string {
-	servicesBox := boxStyle.Render(
-		"🔧 Service Management\n\n" +
-			m.renderServices() +
-			"\n" + m.renderHelp("Services"),
-	)
+	var content string
+
+	// Show startup progress if in progress
+	if m.startupInProgress {
+		content += m.renderStartupProgress() + "\n\n"
+	}
+
+	content += "🔧 Service Management\n\n" + m.renderServices() + "\n" + m.renderHelp("Services")
+	servicesBox := boxStyle.Render(content)
 	return servicesBox + "\n"
 }
 
 func (m model) renderServices() string {
 	var s string
-	
+
 	// Service dependencies info
 	depsInfo := map[string]string{
-		"Graphiti MCP": "→ Depends on: FalkorDB, Ollama",
-		"Atlas Engine": "→ Depends on: Graphiti MCP, FalkorDB",
+		"Graphiti MCP":    "→ Depends on: FalkorDB, Ollama",
+		"Atlas Engine":    "→ Depends on: Graphiti MCP, FalkorDB",
 		"Atlas Dashboard": "→ Depends on: Graphiti MCP, FalkorDB",
 	}
-	
+
 	for i, svc := range m.services {
 		cursor := " "
 		if i == m.selected {
@@ -365,7 +441,7 @@ func (m model) renderServices() string {
 			healthRender := lipgloss.NewStyle().Foreground(lipgloss.Color(healthColor)).Render(svc.health)
 			info += fmt.Sprintf(" | Health: %s", healthRender)
 		}
-		
+
 		// Add dependency info
 		if depInfo, ok := depsInfo[svc.name]; ok {
 			depStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
@@ -392,6 +468,105 @@ func (m model) renderServices() string {
 	}
 
 	return s
+}
+
+func (m model) renderStartupProgress() string {
+	if !m.startupInProgress {
+		return ""
+	}
+
+	var progressBar strings.Builder
+	progressBar.WriteString("🚀 Starting Services\n\n")
+
+	// Calculate overall progress
+	totalProgress := 0.0
+	totalServices := len(m.startupProgress)
+	if totalServices > 0 {
+		for _, p := range m.startupProgress {
+			totalProgress += p.progress
+		}
+		totalProgress = totalProgress / float64(totalServices)
+	}
+
+	// Overall progress bar
+	barWidth := 40
+	filled := int(totalProgress * float64(barWidth))
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	progressBar.WriteString(fmt.Sprintf("Overall Progress: [%s] %.1f%%\n\n", bar, totalProgress*100))
+
+	// Service-by-service progress
+	services := []string{"FalkorDB", "Ollama", "Graphiti MCP"}
+	for _, svcName := range services {
+		progress, exists := m.startupProgress[svcName]
+		if !exists {
+			progress = startupProgress{
+				serviceName: svcName,
+				step:        "pending",
+				progress:    0.0,
+			}
+		}
+
+		// Status icon
+		statusIcon := "○"
+		statusColor := "240"
+		stepText := ""
+		switch progress.step {
+		case "starting":
+			statusIcon = "⟳"
+			statusColor = "214"
+			stepText = "Starting..."
+		case "waiting_health":
+			statusIcon = "⟳"
+			statusColor = "214"
+			stepText = "Waiting for health check..."
+		case "completed":
+			statusIcon = "✓"
+			statusColor = "42"
+			stepText = "Completed"
+		case "failed":
+			statusIcon = "✗"
+			statusColor = "196"
+			stepText = "Failed"
+		default:
+			stepText = "Pending"
+		}
+
+		statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor))
+		progressBar.WriteString(fmt.Sprintf("  %s %s %s\n", statusStyle.Render(statusIcon), svcName, stepText))
+
+		// Service-specific progress bar
+		svcBarWidth := 30
+		svcFilled := int(progress.progress * float64(svcBarWidth))
+		svcBar := strings.Repeat("█", svcFilled) + strings.Repeat("░", svcBarWidth-svcFilled)
+		progressBar.WriteString(fmt.Sprintf("    [%s] %.0f%%\n", svcBar, progress.progress*100))
+
+		// Time info
+		if progress.elapsedTime > 0 {
+			estimatedRemaining := progress.estimatedTotal - progress.elapsedTime
+			if estimatedRemaining < 0 {
+				estimatedRemaining = 0
+			}
+			progressBar.WriteString(fmt.Sprintf("    Elapsed: %v | Est. remaining: %v\n",
+				progress.elapsedTime.Round(time.Second), estimatedRemaining.Round(time.Second)))
+		}
+		progressBar.WriteString("\n")
+	}
+
+	// Show recent logs
+	if len(m.startupLogs) > 0 {
+		progressBar.WriteString("📋 Recent Logs:\n")
+		logCount := 10
+		if len(m.startupLogs) < logCount {
+			logCount = len(m.startupLogs)
+		}
+		logLines := m.startupLogs[len(m.startupLogs)-logCount:]
+		for _, logLine := range logLines {
+			progressBar.WriteString(fmt.Sprintf("  %s\n",
+				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(logLine)))
+		}
+	}
+
+	return boxStyle.Render(progressBar.String())
 }
 
 func (m model) renderLogsView() string {
@@ -444,24 +619,38 @@ func (m model) renderStatsView() string {
 	// Container stats
 	var containerInfo strings.Builder
 	containerInfo.WriteString("🐳 Container Resources\n\n")
+
+	hasStats := false
+	statsCount := 0
 	for _, svc := range m.services {
 		containerName := getContainerName(svc.name)
 		if stat, ok := m.containerStats[containerName]; ok {
+			hasStats = true
+			statsCount++
 			statusColor := "42"
 			if stat.status != "running" {
 				statusColor = "196"
 			}
 			statusRender := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(stat.status)
-			containerInfo.WriteString(fmt.Sprintf("%s: CPU %s | RAM %s (%s)\n",
-				svc.name,
-				formatPercent(stat.cpuPercent),
-				formatPercent(stat.memPercent),
-				stat.memUsage,
-				statusRender))
+			containerInfo.WriteString(fmt.Sprintf("%s:\n", svc.name))
+			containerInfo.WriteString(fmt.Sprintf("  CPU: %s\n", formatPercent(stat.cpuPercent)))
+			containerInfo.WriteString(fmt.Sprintf("  RAM: %s (%s)\n", formatPercent(stat.memPercent), stat.memUsage))
+			containerInfo.WriteString(fmt.Sprintf("  Status: %s\n\n", statusRender))
+		} else if isContainerRunning(containerName) {
+			// Container is running but stats not available yet
+			containerInfo.WriteString(fmt.Sprintf("%s: Collecting stats...\n\n", svc.name))
+		} else {
+			// Container not running
+			containerInfo.WriteString(fmt.Sprintf("%s: Not running\n\n", svc.name))
 		}
 	}
 
-	containerBox := boxStyle.Copy().Width(40).Render(containerInfo.String())
+	if !hasStats && len(m.containerStats) == 0 {
+		containerInfo.WriteString("Waiting for container stats...\n")
+		containerInfo.WriteString(fmt.Sprintf("(Found %d containers)", len(m.containerStats)))
+	}
+
+	containerBox := boxStyle.Copy().Width(50).Render(containerInfo.String())
 
 	statsBox := lipgloss.JoinHorizontal(lipgloss.Top, systemBox, "  ", containerBox)
 	return statsBox + "\n"
@@ -472,24 +661,24 @@ func (m model) renderGraphView() string {
 	graphInfo += fmt.Sprintf("Nodes:    %d\n", m.graphStats.nodeCount)
 	graphInfo += fmt.Sprintf("Edges:    %d\n", m.graphStats.edgeCount)
 	graphInfo += fmt.Sprintf("Last Update: %s\n", m.graphStats.lastUpdate)
-	
+
 	graphInfo += "\n📊 Entity Types:\n"
 	graphInfo += "  • GeographicSoul (State, District, Pincode)\n"
 	graphInfo += "  • IdentityLifecycle\n"
 	graphInfo += "  • SystemicTension\n"
 	graphInfo += "  • BehavioralSignature\n"
 	graphInfo += "  • EmergentThreat\n"
-	
+
 	graphInfo += "\n🔗 Edge Types:\n"
 	graphInfo += "  • LOCATED_IN, BORN_IN, EXPERIENCES\n"
 	graphInfo += "  • MANIFESTS, REVEALS, SUGGESTS\n"
 	graphInfo += "  • ECHOES, PRECEDES\n"
-	
+
 	graphInfo += "\n💡 Explore in Dashboard:\n"
 	graphInfo += "  • Graph3DView: Interactive 3D visualization\n"
 	graphInfo += "  • SemanticView: Semantic search with reasoning\n"
 	graphInfo += "  • Map3DView: Geographic visualization with H3\n"
-	
+
 	graphBox := boxStyle.Render(graphInfo + "\n" + m.renderHelp("Graph"))
 	return graphBox + "\n"
 }
@@ -508,7 +697,7 @@ func (m model) renderConfigView() string {
 
 func (m model) renderDashboardView() string {
 	dashboardInfo := "🌐 Atlas Dashboard - Advanced 3D Visualization Platform\n\n"
-	
+
 	// Check if dashboard is running
 	dashboardRunning := false
 	for _, svc := range m.services {
@@ -517,7 +706,7 @@ func (m model) renderDashboardView() string {
 			break
 		}
 	}
-	
+
 	if dashboardRunning {
 		dashboardInfo += "Status: " + successStyle.Render("● Running") + "\n"
 		dashboardInfo += "Frontend: http://localhost:5173\n"
@@ -526,7 +715,7 @@ func (m model) renderDashboardView() string {
 		dashboardInfo += "Status: " + errorStyle.Render("○ Stopped") + "\n"
 		dashboardInfo += "Press 'd' to start the dashboard\n\n"
 	}
-	
+
 	dashboardInfo += "📊 Available Views:\n\n"
 	views := []struct {
 		name        string
@@ -542,11 +731,11 @@ func (m model) renderDashboardView() string {
 		{"Threats", "Emergent threat analysis", "🛡️"},
 		{"Semantic", "Semantic search with reasoning", "🧠"},
 	}
-	
+
 	for _, view := range views {
 		dashboardInfo += fmt.Sprintf("  %s %s - %s\n", view.icon, view.name, view.description)
 	}
-	
+
 	dashboardInfo += "\n✨ Features:\n"
 	dashboardInfo += "  • H3 Geospatial Indexing (Uber's hexagonal grid)\n"
 	dashboardInfo += "  • Semantic Search with LLM reasoning\n"
@@ -556,7 +745,7 @@ func (m model) renderDashboardView() string {
 	dashboardInfo += "  • Evidence chain backtracking\n"
 	dashboardInfo += "  • Autonomous setup (auto npm install)\n"
 	dashboardInfo += "  • Hot Module Replacement (HMR) in dev mode\n"
-	
+
 	dashboardInfo += "\n🔧 API Endpoints:\n"
 	dashboardInfo += "  • /api/graph/* - Graph queries\n"
 	dashboardInfo += "  • /api/anomalies/* - Anomaly data\n"
@@ -565,7 +754,7 @@ func (m model) renderDashboardView() string {
 	dashboardInfo += "  • /api/threats/* - Threat data\n"
 	dashboardInfo += "  • /api/search - Semantic search\n"
 	dashboardInfo += "  • /api/h3/* - H3 geospatial data\n"
-	
+
 	dashboardBox := boxStyle.Render(dashboardInfo + "\n" + m.renderHelp("Dashboard"))
 	return dashboardBox + "\n"
 }
@@ -757,9 +946,285 @@ func startServices() tea.Cmd {
 		return tea.Batch(
 			startServiceWithDeps("falkordb", []string{}),
 			startServiceWithDeps("ollama", []string{}),
-			func() tea.Msg { return statusMsg{message: "Starting core services (FalkorDB, Ollama)...", msgType: "info"} },
+			func() tea.Msg {
+				return statusMsg{message: "Starting core services (FalkorDB, Ollama)...", msgType: "info"}
+			},
 		)
 	}
+}
+
+// startServicesWithProgress starts services with progress tracking
+func startServicesWithProgress() tea.Cmd {
+	// Use buffered channel to hold all progress messages
+	startupProgressChan = make(chan tea.Msg, 100)
+
+	go func() {
+		// First, check if Docker is running
+		startupProgressChan <- progressMsg{
+			progress: startupProgress{
+				serviceName:    "System",
+				step:           "starting",
+				progress:       0.0,
+				elapsedTime:    0,
+				estimatedTotal: time.Duration(3) * 25 * time.Second,
+				logs:           []string{"Checking Docker status..."},
+			},
+		}
+
+		// Check Docker
+		cmd := exec.Command("docker", "ps")
+		if err := cmd.Run(); err != nil {
+			startupProgressChan <- progressMsg{
+				progress: startupProgress{
+					serviceName:    "System",
+					step:           "failed",
+					progress:       0.0,
+					elapsedTime:    0,
+					estimatedTotal: 0,
+					logs:           []string{"❌ Docker is not running! Please start Docker Desktop first."},
+				},
+			}
+			close(startupProgressChan)
+			return
+		}
+
+		// Check if docker-compose.yml exists
+		if _, err := os.Stat("docker-compose.yml"); os.IsNotExist(err) {
+			startupProgressChan <- progressMsg{
+				progress: startupProgress{
+					serviceName:    "System",
+					step:           "failed",
+					progress:       0.0,
+					elapsedTime:    0,
+					estimatedTotal: 0,
+					logs:           []string{"❌ docker-compose.yml not found in current directory!"},
+				},
+			}
+			close(startupProgressChan)
+			return
+		}
+
+		services := []string{"falkordb", "ollama", "graphiti-mcp"}
+		total := len(services)
+		overallStartTime := time.Now()
+
+		for i, serviceName := range services {
+			displayName := getServiceDisplayName(serviceName)
+			serviceStartTime := time.Now()
+
+			// Initial progress - start at a small value, not 0
+			baseProgress := float64(i) / float64(total)
+			startupProgressChan <- progressMsg{
+				progress: startupProgress{
+					serviceName:    displayName,
+					step:           "starting",
+					progress:       baseProgress + 0.05, // Start at 5% into this service
+					elapsedTime:    time.Since(overallStartTime),
+					estimatedTotal: time.Duration(total) * 30 * time.Second,
+					logs:           []string{fmt.Sprintf("[%s] Starting service...", displayName)},
+				},
+			}
+
+			// Check if already running
+			if isContainerRunning(serviceName) {
+				startupProgressChan <- progressMsg{
+					progress: startupProgress{
+						serviceName:    displayName,
+						step:           "completed",
+						progress:       float64(i+1) / float64(total),
+						elapsedTime:    time.Since(overallStartTime),
+						estimatedTotal: time.Duration(total) * 30 * time.Second,
+						logs:           []string{fmt.Sprintf("[%s] ✓ Already running", displayName)},
+					},
+				}
+				continue
+			}
+
+			// Start the service
+			logs := []string{fmt.Sprintf("[%s] Running: docker compose up -d %s", displayName, serviceName)}
+			cmd := exec.Command("docker", "compose", "up", "-d", serviceName)
+			output, err := cmd.CombinedOutput()
+
+			if err != nil {
+				// Try docker-compose fallback
+				logs = append(logs, fmt.Sprintf("[%s] docker compose failed, trying docker-compose...", displayName))
+				cmd = exec.Command("docker-compose", "up", "-d", serviceName)
+				output2, err2 := cmd.CombinedOutput()
+				if err2 != nil {
+					logs = append(logs, fmt.Sprintf("[%s] ❌ Error starting service: %v", displayName, err2))
+					if len(output2) > 0 {
+						outputStr := strings.TrimSpace(string(output2))
+						// Show more of the error
+						if len(outputStr) > 300 {
+							outputStr = outputStr[:300] + "..."
+						}
+						logs = append(logs, fmt.Sprintf("[%s] Output: %s", displayName, outputStr))
+					}
+					// Also check what the actual error was
+					if exitErr, ok := err2.(*exec.ExitError); ok {
+						logs = append(logs, fmt.Sprintf("[%s] Exit code: %d", displayName, exitErr.ExitCode()))
+					}
+					startupProgressChan <- progressMsg{
+						progress: startupProgress{
+							serviceName:    displayName,
+							step:           "failed",
+							progress:       float64(i+1) / float64(total),
+							elapsedTime:    time.Since(overallStartTime),
+							estimatedTotal: time.Duration(total) * 30 * time.Second,
+							logs:           logs,
+						},
+					}
+					continue
+				}
+				output = output2
+				logs = append(logs, fmt.Sprintf("[%s] ✓ Started with docker-compose", displayName))
+			} else {
+				logs = append(logs, fmt.Sprintf("[%s] ✓ Started with docker compose", displayName))
+			}
+
+			if len(output) > 0 {
+				outputStr := strings.TrimSpace(string(output))
+				// Show more output for debugging
+				if len(outputStr) > 200 {
+					outputStr = outputStr[:200] + "..."
+				}
+				logs = append(logs, fmt.Sprintf("[%s] %s", displayName, outputStr))
+			}
+
+			// Give container a moment to start
+			time.Sleep(2 * time.Second)
+
+			// Check if container is running
+			running, info := getContainerInfo(serviceName)
+			if !running {
+				logs = append(logs, fmt.Sprintf("[%s] ⚠ Container not found after start command", displayName))
+				// Check Docker logs
+				cmd = exec.Command("docker", "logs", "--tail", "10", serviceName)
+				if logOutput, logErr := cmd.CombinedOutput(); logErr == nil && len(logOutput) > 0 {
+					logStr := strings.TrimSpace(string(logOutput))
+					if len(logStr) > 200 {
+						logStr = logStr[:200] + "..."
+					}
+					logs = append(logs, fmt.Sprintf("[%s] Container logs: %s", displayName, logStr))
+				}
+			} else {
+				logs = append(logs, fmt.Sprintf("[%s] Container is running (health: %s)", displayName, info.health))
+			}
+
+			// Waiting for health
+			startupProgressChan <- progressMsg{
+				progress: startupProgress{
+					serviceName:    displayName,
+					step:           "waiting_health",
+					progress:       (float64(i) + 0.6) / float64(total),
+					elapsedTime:    time.Since(overallStartTime),
+					estimatedTotal: time.Duration(total) * 30 * time.Second,
+					logs:           logs,
+				},
+			}
+
+			// Wait for health check - Ollama needs more time on first start
+			healthCheckStart := time.Now()
+			maxWait := 120 * time.Second // Increased timeout for Ollama especially
+			if serviceName == "ollama" {
+				maxWait = 180 * time.Second // Ollama can take up to 3 minutes on first start
+			}
+			checkInterval := 3 * time.Second
+			healthCheckDone := false
+			lastUpdateTime := time.Now()
+
+			for time.Since(healthCheckStart) < maxWait && !healthCheckDone {
+				running, info = getContainerInfo(serviceName)
+				if running {
+					if info.health == "healthy" || info.health == "running" {
+						logs = append(logs, fmt.Sprintf("[%s] ✓ Healthy (health: %s, took: %v)", displayName, info.health, time.Since(serviceStartTime).Round(time.Second)))
+						healthCheckDone = true
+						break
+					}
+					// Update progress based on elapsed time
+					elapsed := time.Since(healthCheckStart)
+					progressIncrement := elapsed.Seconds() / maxWait.Seconds() * 0.3 // 30% of service progress for health check
+					currentProgress := (float64(i) + 0.6 + progressIncrement) / float64(total)
+					if currentProgress > float64(i+1)/float64(total) {
+						currentProgress = float64(i+1) / float64(total)
+					}
+
+					// Send updates every 3 seconds
+					if time.Since(lastUpdateTime) >= 3*time.Second {
+						startupProgressChan <- progressMsg{
+							progress: startupProgress{
+								serviceName:    displayName,
+								step:           "waiting_health",
+								progress:       currentProgress,
+								elapsedTime:    time.Since(overallStartTime),
+								estimatedTotal: time.Duration(total) * 30 * time.Second,
+								logs:           []string{fmt.Sprintf("[%s] Waiting for health check... (elapsed: %v, health: %s)", displayName, elapsed.Round(time.Second), info.health)},
+							},
+						}
+						lastUpdateTime = time.Now()
+					}
+				} else {
+					logs = append(logs, fmt.Sprintf("[%s] ⚠ Container not running yet...", displayName))
+				}
+				time.Sleep(checkInterval)
+			}
+
+			// Final status
+			running, info = getContainerInfo(serviceName)
+			if !healthCheckDone {
+				if running {
+					logs = append(logs, fmt.Sprintf("[%s] ⚠ Started (health: %s, wait time exceeded)", displayName, info.health))
+				} else {
+					logs = append(logs, fmt.Sprintf("[%s] ⚠ May not be fully started", displayName))
+				}
+			}
+
+			// Completed
+			startupProgressChan <- progressMsg{
+				progress: startupProgress{
+					serviceName:    displayName,
+					step:           "completed",
+					progress:       float64(i+1) / float64(total),
+					elapsedTime:    time.Since(overallStartTime),
+					estimatedTotal: time.Duration(total) * 25 * time.Second,
+					logs:           logs,
+				},
+			}
+		}
+		close(startupProgressChan)
+	}()
+
+	return readNextStartupProgress()
+}
+
+// Global channel for startup progress - needed for command chaining
+var startupProgressChan chan tea.Msg
+
+// readNextStartupProgress reads the next progress message from channel
+func readNextStartupProgress() tea.Cmd {
+	if startupProgressChan == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		// Block until we get a message or channel is closed
+		msg, ok := <-startupProgressChan
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func getServiceDisplayName(containerName string) string {
+	names := map[string]string{
+		"falkordb":     "FalkorDB",
+		"ollama":       "Ollama",
+		"graphiti-mcp": "Graphiti MCP",
+	}
+	if name, ok := names[containerName]; ok {
+		return name
+	}
+	return containerName
 }
 
 // startServiceWithDeps starts a service and its dependencies
@@ -887,8 +1352,8 @@ func startServiceIntelligent(serviceName string) tea.Cmd {
 
 		// Define service dependencies
 		dependencies := map[string][]string{
-			"graphiti-mcp": {"falkordb", "ollama"},
-			"atlas-engine": {"graphiti-mcp", "falkordb"},
+			"graphiti-mcp":    {"falkordb", "ollama"},
+			"atlas-engine":    {"graphiti-mcp", "falkordb"},
 			"atlas-dashboard": {"graphiti-mcp", "falkordb"},
 		}
 
@@ -919,7 +1384,8 @@ func startServiceIntelligent(serviceName string) tea.Cmd {
 			cmd = exec.Command("docker", "compose", "up", "-d", containerName)
 		}
 
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		if err != nil {
 			// Try docker-compose fallback
 			if containerName == "atlas-engine" {
 				cmd = exec.Command("docker-compose", "--profile", "processing", "up", "-d", containerName)
@@ -928,8 +1394,17 @@ func startServiceIntelligent(serviceName string) tea.Cmd {
 			} else {
 				cmd = exec.Command("docker-compose", "up", "-d", containerName)
 			}
-			if err := cmd.Run(); err != nil {
-				return statusMsg{message: fmt.Sprintf("Failed to start %s: %v", serviceName, err), msgType: "error"}
+			output, err2 := cmd.CombinedOutput()
+			if err2 != nil {
+				errorMsg := fmt.Sprintf("Failed to start %s: %v", serviceName, err2)
+				if len(output) > 0 {
+					outputStr := strings.TrimSpace(string(output))
+					if len(outputStr) > 200 {
+						outputStr = outputStr[:200] + "..."
+					}
+					errorMsg += fmt.Sprintf("\nOutput: %s", outputStr)
+				}
+				return statusMsg{message: errorMsg, msgType: "error"}
 			}
 		}
 
@@ -999,19 +1474,54 @@ func startProcessing() tea.Cmd {
 			)
 		}
 
-		// Start processing
+		// Start processing with profile
 		cmd := exec.Command("docker", "compose", "--profile", "processing", "up", "-d", "atlas-engine")
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		if err != nil {
+			// Try docker-compose fallback
 			cmd = exec.Command("docker-compose", "--profile", "processing", "up", "-d", "atlas-engine")
-			if err := cmd.Run(); err != nil {
-				return statusMsg{message: fmt.Sprintf("Failed to start processing: %v", err), msgType: "error"}
+			output, err2 := cmd.CombinedOutput()
+			if err2 != nil {
+				errorMsg := fmt.Sprintf("Failed to start Atlas Engine: %v", err2)
+				if len(output) > 0 {
+					outputStr := strings.TrimSpace(string(output))
+					if len(outputStr) > 300 {
+						outputStr = outputStr[:300] + "..."
+					}
+					errorMsg += fmt.Sprintf("\nOutput: %s", outputStr)
+				}
+				return statusMsg{message: errorMsg, msgType: "error"}
 			}
 		}
 
-		time.Sleep(2 * time.Second)
+		// Wait a bit and verify container started
+		time.Sleep(3 * time.Second)
+
+		// Check if container is actually running
+		if !isContainerRunning("atlas-engine") {
+			// Try to get logs to see what went wrong
+			cmd = exec.Command("docker", "compose", "--profile", "processing", "logs", "--tail", "30", "atlas-engine")
+			logOutput, _ := cmd.CombinedOutput()
+			logStr := strings.TrimSpace(string(logOutput))
+			if len(logStr) > 400 {
+				logStr = logStr[:400] + "..."
+			}
+
+			errorMsg := "Atlas Engine container failed to start"
+			if len(logStr) > 0 {
+				errorMsg += fmt.Sprintf("\nLogs: %s", logStr)
+			} else {
+				errorMsg += "\n(No logs available - container may not have been created)"
+			}
+
+			return statusMsg{message: errorMsg, msgType: "error"}
+		}
+
 		return tea.Batch(
 			checkServices(),
-			func() tea.Msg { return statusMsg{message: "Processing pipeline started (check logs for progress)", msgType: "success"} },
+			func() tea.Msg {
+				return statusMsg{message: "Processing pipeline started (check logs for progress)", msgType: "success"}
+			},
 		)
 	}
 }
@@ -1035,7 +1545,7 @@ func startDashboard() tea.Cmd {
 				return statusMsg{message: fmt.Sprintf("Failed to build dashboard: %v\n%s", err2, string(output2)), msgType: "error"}
 			}
 		}
-		
+
 		// Start the container
 		cmd = exec.Command("docker", "compose", "--profile", "dashboard", "up", "-d", "atlas-dashboard")
 		if err := cmd.Run(); err != nil {
@@ -1046,7 +1556,7 @@ func startDashboard() tea.Cmd {
 		}
 
 		time.Sleep(3 * time.Second)
-		
+
 		// Try to open browser (platform-independent)
 		go func() {
 			time.Sleep(2 * time.Second) // Give services a moment to start
@@ -1064,7 +1574,7 @@ func startDashboard() tea.Cmd {
 				openCmd.Run()
 			}
 		}()
-		
+
 		return tea.Batch(
 			checkServices(),
 			func() tea.Msg {
@@ -1117,13 +1627,40 @@ func fetchLogs(serviceName string) tea.Cmd {
 			return logMsg{service: serviceName, lines: []string{"Service not found"}}
 		}
 
-		cmd := exec.Command("docker", "logs", "--tail", "50", containerName)
+		// First check if container exists
+		cmd := exec.Command("docker", "ps", "-a", "--filter", fmt.Sprintf("name=%s", containerName), "--format", "{{.Names}}")
 		output, err := cmd.Output()
+		if err != nil || len(strings.TrimSpace(string(output))) == 0 {
+			return logMsg{service: serviceName, lines: []string{
+				fmt.Sprintf("Container '%s' not found.", containerName),
+				"",
+				"Troubleshooting:",
+				"1. Check if Docker Desktop is running",
+				"2. Try: docker ps -a",
+				"3. Check if service was started: docker compose ps",
+			}}
+		}
+
+		// Get logs
+		cmd = exec.Command("docker", "logs", "--tail", "50", containerName)
+		output, err = cmd.CombinedOutput()
 		if err != nil {
-			return logMsg{service: serviceName, lines: []string{fmt.Sprintf("Error fetching logs: %v", err)}}
+			return logMsg{service: serviceName, lines: []string{
+				fmt.Sprintf("Error fetching logs: %v", err),
+				"",
+				"Container might not be running. Try:",
+				fmt.Sprintf("  docker logs %s", containerName),
+			}}
 		}
 
 		lines := strings.Split(string(output), "\n")
+		if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+			return logMsg{service: serviceName, lines: []string{
+				"No logs available yet.",
+				"Container might be starting. Check status with:",
+				fmt.Sprintf("  docker ps -a | grep %s", containerName),
+			}}
+		}
 		return logMsg{service: serviceName, lines: lines}
 	}
 }
@@ -1181,23 +1718,58 @@ func updateContainerStats() tea.Cmd {
 	return func() tea.Msg {
 		stats := make(map[string]containerStat)
 
-		// Get stats for all containers
-		cmd := exec.Command("docker", "stats", "--no-stream", "--format", "{{.Name}} {{.CPUPerc}} {{.MemPerc}} {{.MemUsage}} {{.Status}}")
-		output, err := cmd.Output()
+		// Get stats for all containers - use a more reliable format
+		cmd := exec.Command("docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}|{{.Status}}")
+		output, err := cmd.CombinedOutput()
 		if err != nil {
+			// If docker stats fails, return empty stats
 			return stats
 		}
 
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		outputStr := strings.TrimSpace(string(output))
+		if outputStr == "" {
+			return stats
+		}
+
+		lines := strings.Split(outputStr, "\n")
 		for _, line := range lines {
-			fields := strings.Fields(line)
-			if len(fields) >= 5 {
-				name := fields[0]
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+
+			// Parse pipe-separated format
+			parts := strings.Split(line, "|")
+			if len(parts) >= 5 {
+				name := strings.TrimSpace(parts[0])
 				var cpuPercent, memPercent float64
-				fmt.Sscanf(fields[1], "%f%%", &cpuPercent)
-				fmt.Sscanf(fields[2], "%f%%", &memPercent)
-				memUsage := fields[3]
-				status := strings.Join(fields[4:], " ")
+
+				// Parse CPU percentage (remove % sign and handle "0.00%" or "N/A")
+				cpuStr := strings.TrimSpace(strings.TrimSuffix(parts[1], "%"))
+				if cpuStr != "N/A" && cpuStr != "--" && cpuStr != "" {
+					_, parseErr := fmt.Sscanf(cpuStr, "%f", &cpuPercent)
+					if parseErr != nil {
+						cpuPercent = 0.0
+					}
+				}
+
+				// Parse Memory percentage (remove % sign and handle "0.00%" or "N/A")
+				memStr := strings.TrimSpace(strings.TrimSuffix(parts[2], "%"))
+				if memStr != "N/A" && memStr != "--" && memStr != "" {
+					_, parseErr := fmt.Sscanf(memStr, "%f", &memPercent)
+					if parseErr != nil {
+						memPercent = 0.0
+					}
+				}
+
+				memUsage := strings.TrimSpace(parts[3])
+				if memUsage == "" {
+					memUsage = "N/A"
+				}
+				status := strings.TrimSpace(parts[4])
+				if status == "" {
+					status = "unknown"
+				}
 
 				stats[name] = containerStat{
 					cpuPercent: cpuPercent,
